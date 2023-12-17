@@ -187,6 +187,7 @@ void scorboard(scorboard_t *players, int player_count)
 void writing_screen(game_client_t *game, int *pos)
 {
     char word[MAX_STRING_SIZE];
+    char c = 0;
 
     if (!game->words) {
         return;
@@ -207,7 +208,8 @@ void writing_screen(game_client_t *game, int *pos)
     }
     attroff(COLOR_PAIR(2));
     refresh();
-    if (getch() == word[*pos]) {
+    c = getch();
+    if (c == word[*pos]) {
         (*pos)++;
     }
     if (*pos == MAX_STRING_SIZE || word[*pos] == 0) {
@@ -283,7 +285,7 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         break;
     
     case SERVER_PLAYER_REMOVE:
-        for (int i = 0; i < MAX_PLAYER; i++) {
+        for (int i = 0; i < game->player_count; i++) {
             if (game->scores[i].player_id == packet->packet.server.player_remove.player_id) {
                 game->player_count--;
                 if (i != game->player_count)

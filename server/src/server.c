@@ -232,14 +232,13 @@ void net_loop(game_server_t *game) {
         game_server_destroy(game);
         exit(EXIT_FAILURE);
     }
-    if (FD_ISSET(game->await, &game->rd_set) && net_client_read(game, game->await) != STABLE) {
-        close(game->await);
-        game->await = -1;
-    }    
     for (int i = 0; i < game->player_count; ++i)
         if (FD_ISSET(game->players[i].socket, &game->rd_set))
             game->players[i].status = net_client_read(game, game->players[i].socket);
-            // game_handle_packet(game, game->players[i--].socket, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={.reason="Lost connection"}});
+    if (game->await != -1 && FD_ISSET(game->await, &game->rd_set) && net_client_read(game, game->await) != STABLE) {
+        close(game->await);
+        game->await = -1;
+    }
     if (FD_ISSET(game->socket, &game->rd_set))
         net_client_accept(game);
 }
@@ -373,6 +372,7 @@ void game_player_add(game_server_t *game, int socket, const client_player_infos_
     join_packet.packet.server.player_join.info = player->info;
     game->player_count++;
     game->await = -1;
+    net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_ACCEPT, .packet.server.player_accept=player->info}, player);
     net_broadcast_packet(game, &join_packet, player->info.player_id);
 }
 

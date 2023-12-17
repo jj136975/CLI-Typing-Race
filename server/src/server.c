@@ -25,11 +25,10 @@ typedef struct linked_word_s
 
 typedef struct player_s
 {
-    int             id;
+    player_info_t   info;
     int             socket;
     net_status_t    status;
-    int             score;
-    int             width;
+    int             start_words;
     char            name[MAX_PLAYER_NAME_SIZE];
     linked_word_t  *current;
 } player_t;
@@ -158,7 +157,7 @@ void net_init(game_server_t *game, const char *host, int port) {
 void net_broadcast_packet(game_server_t *game, const packet_t *packet, int except_id) {
     printf("Broadcast packet %d to %d players except player %d\n", packet->id, game->player_count, except_id);
     for (int i = 0; i < game->player_count; ++i)
-        if (game->players[i].id != except_id && game->players[i].status == STABLE
+        if (game->players[i].info.player_id != except_id && game->players[i].status == STABLE
             && write(game->players[i].socket, packet, sizeof(packet_t)) < 0) {
                 game->players[i].status = BROKEN;
                 game->flags |= HAS_BROKEN_SOCK;
@@ -167,7 +166,7 @@ void net_broadcast_packet(game_server_t *game, const packet_t *packet, int excep
 }
 
 void net_send_packet(game_server_t *game, const packet_t *packet, player_t *player) {
-    printf("Sending packet %d to player %d\n", packet->id, player->id);
+    printf("Sending packet %d to player %d\n", packet->id, player->info.player_id);
     if (player->status == STABLE && write(player->socket, packet, sizeof(packet_t)) < 0) {
         player->status = BROKEN;
         game->flags |= HAS_BROKEN_SOCK;
@@ -196,7 +195,7 @@ void net_client_accept(game_server_t *game) {
     printf("[INFO] Connection from %s:%d\n", inet_ntoa(clnt.sin_addr), ntohs(clnt.sin_port));
 }
 
-int net_client_read(game_server_t *game, int socket) {
+net_status_t net_client_read(game_server_t *game, int socket) {
     static packet_t packet;
     ssize_t size;
 
@@ -249,20 +248,20 @@ void net_loop(game_server_t *game) {
 
 /////////// PLAYER ////////////
 
-void player_init(player_t *player, int socket, int width, const char name[MAX_PLAYER_NAME_SIZE]) {
+void player_init(player_t *player, int socket, int start_words, const char name[MAX_PLAYER_NAME_SIZE]) {
     static int ID = 0;
 
-    player->id = ID++;
-    player->score = 0;
+    player->info = (player_info_t){.player_id=ID++, .score=0, .type=SPECTATOR};
     player->socket = socket;
     player->status = STABLE;
-    player->width = width;
+    player->start_words = start_words;
     strncpy(player->name, name, MAX_PLAYER_NAME_SIZE);
     player->current = NULL;
 }
 
 void player_reset(player_t *player, linked_word_t *list) {
-    player->score = 0;
+    player->info.score = 0;
+    player->info.type = SPECTATOR;
     player->current = list;
 }
 
@@ -333,7 +332,7 @@ player_t *game_find_player(game_server_t *game, int socket) {
 
 int game_find_player_idx(game_server_t *game, int id) {
     for (int i = 0; i < game->player_count; ++i)
-        if (game->players[i].id == id)
+        if (game->players[i].info.player_id == id)
             return i;
     return -1;
 }
@@ -362,26 +361,32 @@ void game_end(game_server_t *game, player_t *winner) {
 
 void game_player_add(game_server_t *game, int socket, const client_player_infos_t *packet) {
     player_t *player = game->players + game->player_count;
-    packet_t join_packet = {.id=SERVER_PLAYER_JOIN, .packet.server.player_join={.player_id=player->id}};
+    packet_t join_packet = {.id=SERVER_PLAYER_JOIN};
 
-    player_init(player, socket, packet->width, packet->name);
+    if (packet->start_words < MIN_START_WORDS || packet->start_words > MAX_START_WORDS) {
+        fprintf(stderr, "[ERROR] Player %.*s asked invalid start words: %d\n", MAX_PLAYER_NAME_SIZE, packet->name, packet->start_words);
+        return;
+    }
+    player_init(player, socket, packet->start_words, packet->name);
     printf("[+] %.*s has joined\n", MAX_PLAYER_NAME_SIZE, packet->name);
     strncpy(join_packet.packet.server.player_join.name, player->name, MAX_PLAYER_NAME_SIZE);
+    join_packet.packet.server.player_join.info = player->info;
     game->player_count++;
-    net_broadcast_packet(game, &join_packet, player->id);
+    game->await = -1;
+    net_broadcast_packet(game, &join_packet, player->info.player_id);
 }
 
 void game_player_remove(game_server_t *game, player_t *player) {
-    int idx = game_find_player_idx(game, player->id);
+    int idx = game_find_player_idx(game, player->info.player_id);
 
     if (idx == -1) {
-        fprintf(stderr, "[ERROR] Player with id %d not found\n", player->id);
+        fprintf(stderr, "[ERROR] Player with id %d not found\n", player->info.player_id);
         return;
     }
     printf("[-] %.*s has left\n", MAX_PLAYER_NAME_SIZE, player->name);
     FD_CLR(player->socket, &game->rd_set);
     player_destroy(player);
-    net_broadcast_packet(game, &(packet_t){.id=SERVER_PLAYER_REMOVE, .packet.server.player_remove={.player_id=player->id}}, player->id);
+    net_broadcast_packet(game, &(packet_t){.id=SERVER_PLAYER_REMOVE, .packet.server.player_remove={.player_id=player->info.player_id}}, player->info.player_id);
     game->player_count--;
     if (idx != game->player_count)
         game->players[idx] = game->players[game->player_count];
@@ -393,7 +398,7 @@ void game_player_remove(game_server_t *game, player_t *player) {
 void game_handle_packet(game_server_t *game, int socket, const packet_t *packet) {
     player_t *player = game_find_player(game, socket);
 
-    printf("Client %d packet: %d\n", player != NULL ? player->id : -1, packet->id);
+    printf("Client %d packet: %d\n", player != NULL ? player->info.player_id : -1, packet->id);
 
     if (player == NULL && packet->id != CLIENT_PLAYER_INFOS) {
         close(socket);
@@ -406,17 +411,15 @@ void game_handle_packet(game_server_t *game, int socket, const packet_t *packet)
         if (player == NULL) {
             if (game->player_count == MAX_PLAYERS)
                 close(socket);
-            else {
+            else
                 game_player_add(game, socket, &packet->packet.client.player_infos);
-                game->await = -1;
-            }
         }
         break;
     
     case CLIENT_WORD_COMPLETE:
         if (game->state == RUNNING && player->current != NULL) {
             player->current = player->current->next;
-            if (player->score++ <= MAX_SCORE)
+            if (player->info.score++ >= MAX_SCORE)
                 game_end(game, player);
         }
         break;
@@ -426,7 +429,7 @@ void game_handle_packet(game_server_t *game, int socket, const packet_t *packet)
         break;
     
     default:
-        printf("[INFO] Invalid packet received by player: %d (%.*s)\n", player->id, MAX_PLAYER_NAME_SIZE, player->name);
+        printf("[INFO] Invalid packet received by player: %d (%.*s)\n", player->info.player_id, MAX_PLAYER_NAME_SIZE, player->name);
     }
 }
 

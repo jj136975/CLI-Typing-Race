@@ -1,3 +1,7 @@
+# Binaries
+tr_client
+tr_server
+
 # Prerequisites
 *.d
 

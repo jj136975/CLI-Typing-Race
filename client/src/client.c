@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <memory.h>
+#include <ncurses.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -10,16 +11,27 @@
 
 #include "packet.h"
 
+typedef struct word_list_s
+{
+    struct word_list_s *next;
+    char word[MAX_STRING_SIZE];
+} word_list_t;
+
+typedef struct scorboard_s {
+    char name[MAX_PLAYER_NAME_SIZE];
+    int score;
+} scorboard_t;
+
 typedef struct game_client_s
 {
-    int             socket;
-    fd_set          set;
-    player_info_t   info;
-    net_status_t    status;
-    int             running;
+    int                  socket;
+    fd_set               set;
+    player_info_t        info;
+    net_status_t         status;
+    int                  running;
+    word_list_t          *words;
+    server_game_status_t game_status;
 } game_client_t;
-
-
 
 /////////// FORWARD DECLARATIONS ////////////
 
@@ -103,8 +115,9 @@ void net_loop(game_client_t *client) {
 /////////// CLIENT ////////////
 
 void game_client_init(game_client_t *client, const char *host, int port, const char *name) {
-    packet_t join_packet = {.id=CLIENT_PLAYER_INFOS, .packet.client.player_infos={.start_words=10}};
+    packet_t join_packet = {.id=CLIENT_PLAYER_INFOS, .packet.client.player_infos={.start_words=MAX_START_WORDS}};
 
+    client->words = 0;
     strncpy(join_packet.packet.client.player_infos.name, name, MAX_PLAYER_NAME_SIZE);
     net_init(client, host, port);
     net_send_packet(client, &join_packet);
@@ -117,12 +130,124 @@ void game_client_destroy(game_client_t *client) {
     client->status = CLOSED;
 }
 
-void game_client_start(game_client_t *client) {
+void init_ncurse_win()
+{
+    initscr();
+    start_color();
+    noecho();
+    curs_set(0);
+    timeout(100);
+    init_pair(1, COLOR_GREEN, COLOR_BLACK);
+    init_pair(2, COLOR_WHITE, COLOR_BLACK);
+    init_pair(3, COLOR_WHITE, COLOR_BLUE);
+}
+
+int invalid_terminal_size()
+{
+    if (LINES < 5 || COLS < 80) {
+        mvprintw(0, 0, "Increase your terminal size to x>=5 and y >= 80 (x=%d and y=%d)", LINES, COLS);
+        refresh();
+        sleep(1000);
+        return 1;
+    }
+    return 0;
+}
+
+void timer(int time)
+{
+    mvprintw(0, COLS - 4, "%.3ds", time);
+}
+
+void scorboard(scorboard_t *players, int player_count)
+{
+    for (int i = 0; i < player_count; i++) {
+        mvprintw(i + 2, COLS - MAX_PLAYER_NAME_SIZE - 4, "%.*s ", MAX_PLAYER_NAME_SIZE, players[i].name);
+        mvprintw(i + 2, COLS - 4, "%.4d", players[i].score);
+    }
+}
+
+void writing_screen(game_client_t *game, int *pos)
+{
+    char word[MAX_STRING_SIZE];
+
+    if (!game->words)
+        return;
+    strncpy(word, game->words->word, MAX_STRING_SIZE);
+    move(1, 1);
+    attron(COLOR_PAIR(1));
+    for (int i = 0; i < *pos; i++) {
+        printw("%c", word[i]);
+    }
+    attroff(COLOR_PAIR(1));
+    attron(COLOR_PAIR(3));
+    printw("%c", word[*pos]);
+    attroff(COLOR_PAIR(3));
+    attron(COLOR_PAIR(2));
+    for (int i = *pos + 1; i < 10; i++) {
+        printw("%c", word[i]);
+    }
+    attroff(COLOR_PAIR(2));
+    refresh();
+    if (getch() == word[*pos]) {
+        (*pos)++;
+    }
+    if (*pos == MAX_STRING_SIZE || word[*pos] == 0) {
+        net_send_packet(game, &(packet_t){.id=CLIENT_WORD_COMPLETE});
+        // word_list_t *tmp = game->words;
+        // game->words = game->words->next;
+        // free(tmp);
+        (*pos) = 0;
+    }
+}
+
+void waiting_screen()
+{
+    mvprintw(0, 0, "Waiting for players...");
+    refresh();
+}
+
+void game_client_start(game_client_t *client)
+{
+    int player_count = 3;
+    scorboard_t scores[4] = {
+        {
+            .name="rat",
+            .score=10
+        },
+        {
+            .name="thomas",
+            .score=5
+        },
+        {
+            .name="a",
+            .score=8
+        },
+        {
+            .name="zjgao",
+            .score=85
+        }
+    };
+    int cursor_pos = 0;
+    int time_remain = 10;
+
+    client->words = malloc(sizeof(word_list_t));
+    client->words->next = 0;
+    strncpy(client->words->word, "salut", MAX_STRING_SIZE);
+    init_ncurse_win();
     client->running = 1;
     while (client->running)
     {
         net_loop(client);
+        clear();
+        if (invalid_terminal_size())
+            continue;
+        timer(time_remain);
+        scorboard(scores, player_count);
+        writing_screen(client, &cursor_pos);
+        if (time_remain > 0)
+            time_remain--;
     }
+    endwin();
 }
 
 
@@ -135,11 +260,10 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
     switch (packet->id)
     {
     case SERVER_GAME_STATUS:
+        game->game_status = packet->packet.server.game_status;
         break;
-
     case SERVER_PLAYER_UPDATE:
         if (packet->packet.server.player_update.player_id != game->info.player_id) {
-            // Update other client
             break;
         }
         [[fallthrough]];
@@ -152,6 +276,19 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
     case SERVER_PLAYER_JOIN:
         break;
     case SERVER_NEW_WORD:
+        word_list_t *node = malloc(sizeof(node));
+        word_list_t *it = game->words;
+
+        node->next = 0;
+        strncpy(node->word, packet->packet.server.new_line.word, MAX_STRING_SIZE);
+        if (!game->words) {
+            game->words = node;
+            break;
+        }
+        while (it && it->next) {
+            it = it->next;
+        }
+        it->next = node;
         break;
     
     default:

@@ -1,5 +1,7 @@
 {
     "files.associations": {
-        "select.h": "c"
+        "*.c": "c",
+        "select.h": "c",
+        "ncurses.h": "c"
     }
 }

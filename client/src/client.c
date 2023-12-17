@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "packet.h"
@@ -102,6 +103,8 @@ void net_loop(game_client_t *client) {
 
     sigemptyset(&SIGSET);
     sigaddset(&SIGSET, SIGINT);
+    sigaddset(&SIGSET, SIGALRM);
+
     FD_ZERO(&client->set);
     FD_SET(client->socket, &client->set);
 
@@ -125,7 +128,8 @@ void game_client_init(game_client_t *client, const char *host, int port, const c
 
     client->player_count = 0;
     client->words = 0;
-    client->game_status.time_remain = 0;
+    client->game_status.time_remain = -1;
+    client->game_status.state = WAITTING;
     strncpy(join_packet.packet.client.player_infos.name, name, MAX_PLAYER_NAME_SIZE);
     strncpy(client->scores[0].name, name, MAX_PLAYER_NAME_SIZE);
     net_init(client, host, port);
@@ -165,7 +169,10 @@ int invalid_terminal_size()
 
 void timer(int time)
 {
-    mvprintw(0, COLS - 4, "%.3ds", time);
+    if (time < 0)
+        mvprintw(0, COLS - 7, "PAUSED");
+    else
+        mvprintw(0, COLS - 4, "%- .3ds", time);
 }
 
 void scorboard(scorboard_t *players, int player_count)
@@ -235,8 +242,6 @@ void game_client_start(game_client_t *client)
             writing_screen(client, &cursor_pos);
         else
             waiting_screen();
-        if (client->game_status.time_remain > 0)
-            client->game_status.time_remain--;
     }
 }
 
@@ -313,6 +318,11 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
 /////////// SIGNAL ////////////
 
 static int *TARGET = NULL;
+static int *REMAIN = NULL;
+static const struct itimerval TIMER = {
+    .it_interval={.tv_sec=1, .tv_usec=0},
+    .it_value={.tv_sec=1, .tv_usec=0}
+};
 
 void signal_handler(int signal) {
     if (TARGET == NULL)
@@ -323,6 +333,11 @@ void signal_handler(int signal) {
     }
 }
 
+void alarm_handler(int signal) {
+    if (signal == SIGALRM && REMAIN != NULL && *REMAIN > 0) {
+        *REMAIN -= TIMER.it_value.tv_sec;
+    }
+}
 
 
 /////////// MAIN ////////////
@@ -343,8 +358,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
     signal(SIGINT, signal_handler);
+    signal(SIGALRM, alarm_handler);
+    setitimer(ITIMER_REAL, &TIMER, NULL);
     game_client_init(&client, argv[1], port, argv[3]);
     TARGET = &client.running;
+    REMAIN = &client.game_status.time_remain;
     game_client_start(&client);
     game_client_destroy(&client);
     return EXIT_SUCCESS;

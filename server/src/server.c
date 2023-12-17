@@ -298,7 +298,10 @@ void player_send_update(game_server_t *game, player_t *player) {
 void player_send_join(game_server_t *game, player_t *player) {
     packet_t join_packet = {.id=SERVER_PLAYER_JOIN, .packet.server.player_join={.join_type=NEW_PLAYER, .info=player->info}};
 
-    net_send_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, player);
+    if (game->state == RUNNING)
+        net_send_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, player);
+    else
+        net_broadcast_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, -1);
     strncpy(join_packet.packet.server.player_join.name, player->name, MAX_PLAYER_NAME_SIZE);
     net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_ACCEPT, .packet.server.player_accept=player->info}, player);
     net_broadcast_packet(game, &join_packet, player->info.player_id);
@@ -404,7 +407,7 @@ void game_start(game_server_t *game) {
     for (int i = 0; i < game->player_count; ++i) {
         player_reset(game->players + i, game->last);
         game->players[i].info.mode = PLAYER;
-        for (int i = 0; i < game->players[i].start_words && game->players[i].status == STABLE; ++i)
+        for (int j = 0; j < game->players[i].start_words && game->players[i].status == STABLE; ++j)
             player_send_word(game, game->players + i);
     }
     game_update_all_players(game);
@@ -484,12 +487,14 @@ void game_handle_packet(game_server_t *game, int socket, const packet_t *packet)
         break;
     
     case CLIENT_WORD_COMPLETE:
-        if (game->state == RUNNING && player->current != NULL) {
+        if (game->state == RUNNING && player->info.mode == PLAYER && player->current != NULL) {
             player->current = player->current->next;
             if (player->info.score++ >= MAX_SCORE)
                 game_end(game, player);
-            else
+            else {
+                net_broadcast_packet(game, &(packet_t){.id=SERVER_PLAYER_UPDATE, .packet.server.player_update=player->info}, -1);
                 player_send_word(game, player);
+            }
         }
         break;
     

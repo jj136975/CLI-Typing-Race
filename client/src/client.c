@@ -19,6 +19,7 @@ typedef struct word_list_s
 
 typedef struct scorboard_s {
     char name[MAX_PLAYER_NAME_SIZE];
+    int player_id;
     int score;
 } scorboard_t;
 
@@ -94,12 +95,15 @@ net_status_t net_game_read(game_client_t *client) {
 }
 
 void net_loop(game_client_t *client) {
-    struct timeval timeout = SELECT_TO;
-    
+    static const struct timespec SELECT_TO = {.tv_sec=0, .tv_nsec=50000000};
+    static sigset_t SIGSET;
+
+    sigemptyset(&SIGSET);
+    sigaddset(&SIGSET, SIGINT);
     FD_ZERO(&client->set);
     FD_SET(client->socket, &client->set);
 
-    if (select(client->socket + 1, &client->set, NULL, NULL, &timeout) < 0) {
+    if (pselect(client->socket + 1, &client->set, NULL, NULL, &SELECT_TO, &SIGSET) < 0) {
         perror("select()");
         game_client_destroy(client);
         exit(EXIT_FAILURE);
@@ -127,6 +131,7 @@ void game_client_destroy(game_client_t *client) {
     if (client->status == STABLE)
         net_send_packet(client, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={"Client disconnect"}});
     close(client->socket);
+    endwin();
     client->status = CLOSED;
 }
 
@@ -247,7 +252,6 @@ void game_client_start(game_client_t *client)
         if (time_remain > 0)
             time_remain--;
     }
-    endwin();
 }
 
 

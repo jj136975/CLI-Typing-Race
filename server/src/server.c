@@ -37,7 +37,8 @@ typedef struct player_s
 
 #define     MAX_SCORE   50
 
-#define     HAS_BROKEN_SOCK     0x1
+#define     FLAG_BROKEN_SOCK    0x01
+#define     FLAG_CHANGE_MODE    0x02
 
 typedef struct game_server_s
 {
@@ -63,6 +64,8 @@ static inline int min(int a, int b) {
 /////////// FORWARD DECLARATIONS ////////////
 
 void game_server_destroy(game_server_t *game);
+void game_start(game_server_t *game);
+void game_end(game_server_t *game, player_t *winner);
 void game_player_remove(game_server_t *game, player_t *player);
 void game_handle_packet(game_server_t *game, int socket, const packet_t *packet);
 
@@ -162,7 +165,7 @@ void net_broadcast_packet(game_server_t *game, const packet_t *packet, int excep
         if (game->players[i].info.player_id != except_id && game->players[i].status == STABLE
             && write(game->players[i].socket, packet, sizeof(packet_t)) < 0) {
                 game->players[i].status = BROKEN;
-                game->flags |= HAS_BROKEN_SOCK;
+                game->flags |= FLAG_BROKEN_SOCK;
             }
             // game_handle_packet(game, game->players[i--].socket, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={.reason="Lost connection"}});
 }
@@ -171,7 +174,7 @@ void net_send_packet(game_server_t *game, const packet_t *packet, player_t *play
     printf("Sending packet %d to player %d\n", packet->id, player->info.player_id);
     if (player->status == STABLE && write(player->socket, packet, sizeof(packet_t)) < 0) {
         player->status = BROKEN;
-        game->flags |= HAS_BROKEN_SOCK;
+        game->flags |= FLAG_BROKEN_SOCK;
     }
             // game_handle_packet(game, player->socket, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={.reason="Lost connection"}});
 }
@@ -208,7 +211,7 @@ net_status_t net_client_read(game_server_t *game, int socket) {
         }
         if (size < 0) {
             fprintf(stderr, "[ERROR] Could not read socket: %d\n", socket);
-            game->flags |= HAS_BROKEN_SOCK;
+            game->flags |= FLAG_BROKEN_SOCK;
             return BROKEN;
         }
         printf("[INFO] Invalid packet size (%ld) on socket: %d\n", size, socket);
@@ -330,7 +333,7 @@ void game_server_destroy(game_server_t *game) {
 }
 
 void game_server_clean(game_server_t *game) {
-    game->flags = 0;
+    game->flags ^= FLAG_BROKEN_SOCK;
     for (int i = 0; i < game->player_count; ++i) {
         switch (game->players[i].status)
         {
@@ -345,14 +348,28 @@ void game_server_clean(game_server_t *game) {
     }
 }
 
+player_t *game_find_winner(game_server_t *game) {
+    player_t *player = game->players;
+
+    if (game->player_count == 0)
+        return NULL;
+    for (int i = 1; i < game->player_count; ++i)
+        if (game->players->info.score > player->info.score)
+            player = game->players + i;
+    return player;
+}
+
 void game_server_start(game_server_t *game) {
     game->running = 1;
-
     while (game->running)
     {
         net_loop(game);
-        while (game->flags != 0)
+        while (game->flags & FLAG_BROKEN_SOCK)
             game_server_clean(game);
+        if (game->flags & FLAG_CHANGE_MODE) {
+            game->state == RUNNING ? game_end(game, game_find_winner(game)) : game_start(game);
+            game->flags ^= FLAG_CHANGE_MODE;
+        }
     }
 }
 
@@ -413,6 +430,7 @@ void game_player_add(game_server_t *game, int socket, const client_player_infos_
         return;
     }
     player_init(player, socket, packet->start_words, packet->name);
+    net_send_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, player);
     printf("[+] %.*s has joined\n", MAX_PLAYER_NAME_SIZE, packet->name);
     game->player_count++;
     game->await = -1;

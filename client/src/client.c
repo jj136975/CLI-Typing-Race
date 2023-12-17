@@ -104,6 +104,7 @@ void net_loop(game_client_t *client) {
     sigemptyset(&SIGSET);
     sigaddset(&SIGSET, SIGINT);
     sigaddset(&SIGSET, SIGALRM);
+    sigaddset(&SIGSET, SIGWINCH);
 
     FD_ZERO(&client->set);
     FD_SET(client->socket, &client->set);

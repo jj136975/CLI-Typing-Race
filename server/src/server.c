@@ -228,6 +228,7 @@ void net_loop(game_server_t *game) {
     sigemptyset(&SIGSET);
     sigaddset(&SIGSET, SIGINT);
     sigaddset(&SIGSET, SIGALRM);
+    sigaddset(&SIGSET, SIGWINCH);
 
     FD_ZERO(&game->rd_set);
     FD_SET(game->socket, &game->rd_set);

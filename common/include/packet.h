@@ -51,15 +51,15 @@ typedef struct server_player_accept_s
 } server_player_accept_t;
 
 // SERVER_PLAYER_UPDATE
-typedef enum player_type_e {
+typedef enum player_mode_e {
     PLAYER,
     SPECTATOR,
-} player_type_t;
+} player_mode_t;
 
 typedef struct player_info_s
 {
     int             player_id;
-    player_type_t   type;
+    player_mode_t   mode;
     int             score;
 } player_info_t;
 
@@ -73,9 +73,15 @@ typedef struct server_player_remove_s
 
 #define     MAX_PLAYER_NAME_SIZE    16
 
+typedef enum join_type_e {
+    NEW_PLAYER,
+    OLD_PLAYER,
+} join_type_t;
+
 typedef struct server_player_join_s
 {
     player_info_t   info;
+    join_type_t     join_type;
     char            name[MAX_PLAYER_NAME_SIZE];
 } server_player_join_t;
 
@@ -83,7 +89,6 @@ typedef struct server_player_join_s
 
 typedef struct server_new_word_s
 {
-    int             count;
     packet_string_t word;
 } server_new_word_t;
 
@@ -129,7 +134,7 @@ typedef struct packet_s
             player_info_t           player_update;
             server_player_remove_t  player_remove;
             server_player_join_t    player_join;
-            server_new_word_t       new_line;
+            server_new_word_t       new_word;
         }           server;
         union
         {

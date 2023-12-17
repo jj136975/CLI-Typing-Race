@@ -280,7 +280,7 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         word_list_t *it = game->words;
 
         node->next = 0;
-        strncpy(node->word, packet->packet.server.new_line.word, MAX_STRING_SIZE);
+        strncpy(node->word, packet->packet.server.new_word.word, MAX_STRING_SIZE);
         if (!game->words) {
             game->words = node;
             break;

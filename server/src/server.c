@@ -7,6 +7,8 @@
 #include <string.h>
 #include <sys/fcntl.h>
 #include <sys/select.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "packet.h"
@@ -63,6 +65,7 @@ static inline int min(int a, int b) {
 void game_server_destroy(game_server_t *game);
 void game_player_remove(game_server_t *game, player_t *player);
 void game_handle_packet(game_server_t *game, int socket, const packet_t *packet);
+
 
 
 /////////// WORDS ////////////
@@ -126,7 +129,6 @@ void word_list_destroy(linked_word_t *list) {
 /////////// NETWORK ////////////
 
 static int MAX_FD = -1;
-static const struct timeval SELECT_TO = {.tv_sec=0, .tv_usec=50000};
 
 void net_init(game_server_t *game, const char *host, int port) {
     int sockfd;
@@ -216,8 +218,12 @@ net_status_t net_client_read(game_server_t *game, int socket) {
 }
 
 void net_loop(game_server_t *game) {
-    struct timeval timeout = SELECT_TO;
-    
+    static const struct timespec SELECT_TO = {.tv_sec=0, .tv_nsec=50000000};
+    static sigset_t SIGSET;
+
+    sigemptyset(&SIGSET);
+    sigaddset(&SIGSET, SIGINT);
+
     FD_ZERO(&game->rd_set);
     FD_SET(game->socket, &game->rd_set);
     if (game->await != -1)
@@ -225,7 +231,7 @@ void net_loop(game_server_t *game) {
     for (int i = 0; i < game->player_count; ++i)
         FD_SET(game->players[i].socket, &game->rd_set);
     
-    if (select(MAX_FD + 1, &game->rd_set, NULL, NULL, &timeout) < 0) {
+    if (pselect(MAX_FD + 1, &game->rd_set, NULL, NULL, &SELECT_TO, &SIGSET) < 0) {
         if (!game->running)
             return;
         perror("select()");
@@ -250,7 +256,7 @@ void net_loop(game_server_t *game) {
 void player_init(player_t *player, int socket, int start_words, const char name[MAX_PLAYER_NAME_SIZE]) {
     static int ID = 0;
 
-    player->info = (player_info_t){.player_id=ID++, .score=0, .type=SPECTATOR};
+    player->info = (player_info_t){.player_id=ID++, .score=0, .mode=SPECTATOR};
     player->socket = socket;
     player->status = STABLE;
     player->start_words = start_words;
@@ -260,7 +266,7 @@ void player_init(player_t *player, int socket, int start_words, const char name[
 
 void player_reset(player_t *player, linked_word_t *list) {
     player->info.score = 0;
-    player->info.type = SPECTATOR;
+    player->info.mode = SPECTATOR;
     player->current = list;
 }
 
@@ -269,6 +275,34 @@ void player_destroy(player_t *player) {
         close(player->socket);
         player->socket = -1;
         player->status = CLOSED;
+    }
+}
+
+void player_send_word(game_server_t *game, player_t *player) {
+    packet_t word_packet = {.id=SERVER_NEW_WORD};
+
+    strncpy(word_packet.packet.server.new_word.word, player->current->word, MAX_STRING_SIZE);
+    player->current = player->current->next;
+    net_send_packet(game, &word_packet, player);
+}
+
+void player_send_update(game_server_t *game, player_t *player) {
+    net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_UPDATE, .packet.server.player_update=player->info}, player);
+}
+
+void player_send_join(game_server_t *game, player_t *player) {
+    packet_t join_packet = {.id=SERVER_PLAYER_JOIN, .packet.server.player_join={.join_type=NEW_PLAYER, .info=player->info}};
+
+    strncpy(join_packet.packet.server.player_join.name, player->name, MAX_PLAYER_NAME_SIZE);
+    net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_ACCEPT, .packet.server.player_accept=player->info}, player);
+    net_broadcast_packet(game, &join_packet, player->info.player_id);
+    join_packet.packet.server.player_join.join_type=OLD_PLAYER;
+    for (int i = 0; i < game->player_count; ++i) {
+        if (game->players + i == player)
+            continue;
+        strncpy(join_packet.packet.server.player_join.name, game->players[i].name, MAX_PLAYER_NAME_SIZE);
+        join_packet.packet.server.player_join.info = game->players[i].info;
+        net_send_packet(game, &join_packet, player);
     }
 }
 
@@ -336,11 +370,24 @@ int game_find_player_idx(game_server_t *game, int id) {
     return -1;
 }
 
+void game_update_all_players(game_server_t *game) {
+    for (int i = 0; i < game->player_count; ++i)
+        net_broadcast_packet(game, &(packet_t){
+            .id=SERVER_PLAYER_UPDATE,
+            .packet.server.player_update=game->players[i].info
+        }, -1);
+}
+
 void game_start(game_server_t *game) {
     game->state = RUNNING;
     game->time_remain = GAME_RUNNING_TIME;
-    for (int i = 0; i < game->player_count; ++i)
+    for (int i = 0; i < game->player_count; ++i) {
         player_reset(game->players + i, game->last);
+        game->players[i].info.mode = PLAYER;
+        for (int i = 0; i < game->players[i].start_words && game->players[i].status == STABLE; ++i)
+            player_send_word(game, game->players + i);
+    }
+    game_update_all_players(game);
     printf("[INFO] Game has started with %d players\n", game->player_count);
     net_broadcast_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, -1);
 }
@@ -360,7 +407,6 @@ void game_end(game_server_t *game, player_t *winner) {
 
 void game_player_add(game_server_t *game, int socket, const client_player_infos_t *packet) {
     player_t *player = game->players + game->player_count;
-    packet_t join_packet = {.id=SERVER_PLAYER_JOIN};
 
     if (packet->start_words < MIN_START_WORDS || packet->start_words > MAX_START_WORDS) {
         fprintf(stderr, "[ERROR] Player %.*s asked invalid start words: %d\n", MAX_PLAYER_NAME_SIZE, packet->name, packet->start_words);
@@ -368,12 +414,9 @@ void game_player_add(game_server_t *game, int socket, const client_player_infos_
     }
     player_init(player, socket, packet->start_words, packet->name);
     printf("[+] %.*s has joined\n", MAX_PLAYER_NAME_SIZE, packet->name);
-    strncpy(join_packet.packet.server.player_join.name, player->name, MAX_PLAYER_NAME_SIZE);
-    join_packet.packet.server.player_join.info = player->info;
     game->player_count++;
     game->await = -1;
-    net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_ACCEPT, .packet.server.player_accept=player->info}, player);
-    net_broadcast_packet(game, &join_packet, player->info.player_id);
+    player_send_join(game, player);
 }
 
 void game_player_remove(game_server_t *game, player_t *player) {

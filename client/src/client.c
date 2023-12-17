@@ -173,7 +173,7 @@ void timer(int time)
     if (time < 0)
         mvprintw(0, COLS - 7, "PAUSED");
     else
-        mvprintw(0, COLS - 4, "%- .3ds", time);
+        mvprintw(0, COLS - 5, "%- .3ds", time);
 }
 
 void scorboard(scorboard_t *players, int player_count)
@@ -268,10 +268,13 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         game->game_status = packet->packet.server.game_status;
         break;
     case SERVER_PLAYER_UPDATE:
-        if (packet->packet.server.player_update.player_id != game->info.player_id) {
-            break;
+        for (int i = 0; i < game->player_count; i++) {
+            if (packet->packet.server.player_update.player_id == game->scores[i].player_id) {
+                game->scores[i].score = packet->packet.server.player_update.score;
+                break;
+            }
         }
-        [[fallthrough]];
+        break;
     case SERVER_PLAYER_ACCEPT:
         game->info = packet->packet.server.player_accept;
         game->scores[game->player_count].score = game->info.score;
@@ -296,7 +299,7 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         game->player_count++;
         break;
     case SERVER_NEW_WORD:
-        word_list_t *node = malloc(sizeof(node));
+        word_list_t *node = malloc(sizeof(word_list_t));
         word_list_t *it = game->words;
 
         node->next = 0;

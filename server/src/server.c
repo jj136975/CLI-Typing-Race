@@ -14,6 +14,7 @@
 #include "packet.h"
 
 #define     MAX_PLAYERS         4
+#define     MIN_PLAYERS         2
 
 #define     GAME_WAITTING_TIME  15
 #define     GAME_RUNNING_TIME   60
@@ -226,6 +227,7 @@ void net_loop(game_server_t *game) {
 
     sigemptyset(&SIGSET);
     sigaddset(&SIGSET, SIGINT);
+    sigaddset(&SIGSET, SIGALRM);
 
     FD_ZERO(&game->rd_set);
     FD_SET(game->socket, &game->rd_set);
@@ -296,6 +298,7 @@ void player_send_update(game_server_t *game, player_t *player) {
 void player_send_join(game_server_t *game, player_t *player) {
     packet_t join_packet = {.id=SERVER_PLAYER_JOIN, .packet.server.player_join={.join_type=NEW_PLAYER, .info=player->info}};
 
+    net_send_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, player);
     strncpy(join_packet.packet.server.player_join.name, player->name, MAX_PLAYER_NAME_SIZE);
     net_send_packet(game, &(packet_t){.id=SERVER_PLAYER_ACCEPT, .packet.server.player_accept=player->info}, player);
     net_broadcast_packet(game, &join_packet, player->info.player_id);
@@ -315,7 +318,7 @@ void player_send_join(game_server_t *game, player_t *player) {
 
 void game_server_init(game_server_t *game, const char *host, int port,  const char *filename) {
     game->state = WAITTING;
-    game->time_remain = GAME_WAITTING_TIME;
+    game->time_remain = -1;
     game->player_count = 0;
     FD_ZERO(&game->rd_set);
     game->flags = 0;
@@ -366,9 +369,9 @@ void game_server_start(game_server_t *game) {
         net_loop(game);
         while (game->flags & FLAG_BROKEN_SOCK)
             game_server_clean(game);
-        if (game->flags & FLAG_CHANGE_MODE) {
+        if (game->time_remain == 0 || game->flags & FLAG_CHANGE_MODE) {
+            game->flags &= ~FLAG_CHANGE_MODE;
             game->state == RUNNING ? game_end(game, game_find_winner(game)) : game_start(game);
-            game->flags ^= FLAG_CHANGE_MODE;
         }
     }
 }
@@ -410,15 +413,17 @@ void game_start(game_server_t *game) {
 }
 
 void game_end(game_server_t *game, player_t *winner) {
-    game->state = WAITTING;
-    game->time_remain = GAME_WAITTING_TIME;
-
-    if (winner == NULL)
-        printf("[INFO] Game has ended without winner\n");
-    else {
-        game->last = winner->current;
-        printf("[INFO] Game has ended won by: %.*s\n", MAX_PLAYER_NAME_SIZE, winner->name);
+    if (game->state == RUNNING) {
+        if (winner == NULL)
+            printf("[INFO] Game has ended without winner\n");
+        else {
+            game->last = winner->current;
+            printf("[INFO] Game has ended won by: %.*s\n", MAX_PLAYER_NAME_SIZE, winner->name);
+        }
     }
+    game->state = WAITTING;
+    game->time_remain = game->time_remain < 2 ? -1 : GAME_WAITTING_TIME;
+
     net_broadcast_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, -1);
 }
 
@@ -430,10 +435,11 @@ void game_player_add(game_server_t *game, int socket, const client_player_infos_
         return;
     }
     player_init(player, socket, packet->start_words, packet->name);
-    net_send_packet(game, &(packet_t){.id=SERVER_GAME_STATUS, .packet.server.game_status={.state=game->state, .time_remain=game->time_remain}}, player);
     printf("[+] %.*s has joined\n", MAX_PLAYER_NAME_SIZE, packet->name);
     game->player_count++;
     game->await = -1;
+    if (game->state == WAITTING && game->player_count >= MIN_PLAYERS)
+        game->time_remain = GAME_WAITTING_TIME;
     player_send_join(game, player);
 }
 
@@ -451,8 +457,8 @@ void game_player_remove(game_server_t *game, player_t *player) {
     game->player_count--;
     if (idx != game->player_count)
         game->players[idx] = game->players[game->player_count];
-    if (game->player_count == 0)
-        game_end(game, NULL);
+    if (game->player_count < 2)
+        game_end(game, game_find_winner(game));
 }
 
 
@@ -498,19 +504,29 @@ void game_handle_packet(game_server_t *game, int socket, const packet_t *packet)
 
 
 
-/////////// SIGNAL ////////////
+/////////// SIGNAL & CLOCK ////////////
 
-static int *TARGET = NULL;
+static int *SHUTDOWN = NULL;
+static int *REMAIN = NULL;
+static const struct itimerval TIMER = {
+    .it_interval={.tv_sec=1, .tv_usec=0},
+    .it_value={.tv_sec=1, .tv_usec=0}
+};
 
 void signal_handler(int signal) {
-    if (TARGET == NULL)
-        fprintf(stderr, "[ERROR] No target for signal (%d)\n", signal);
+    if (SHUTDOWN == NULL)
+        fprintf(stderr, "[ERROR] SHUTDOWN not set for signal (%d)\n", signal);
     else {
-        *TARGET = 0;
+        *SHUTDOWN = 0;
         printf("[INFO] Gracefully shutting down server\n");
     }
 }
 
+void alarm_handler(int signal) {
+    if (signal == SIGALRM && REMAIN != NULL && *REMAIN > 0) {
+        *REMAIN -= TIMER.it_value.tv_sec;
+    }
+}
 
 
 /////////// MAIN ////////////
@@ -532,8 +548,11 @@ int main(int ac, char **av) {
         exit(EXIT_FAILURE);
     }
     signal(SIGINT, signal_handler);
+    signal(SIGALRM, alarm_handler);
+    setitimer(ITIMER_REAL, &TIMER, NULL);
     game_server_init(&game, av[1], port, av[3]);
-    TARGET = &game.running;
+    SHUTDOWN = &game.running;
+    REMAIN = &game.time_remain;
     game_server_start(&game);
     game_server_destroy(&game);
     return EXIT_SUCCESS;

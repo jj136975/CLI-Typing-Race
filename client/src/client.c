@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 #include "packet.h"
@@ -12,6 +13,8 @@
 typedef struct game_client_s
 {
     int             socket;
+    fd_set          set;
+    player_info_t   info;
     net_status_t    status;
     int             running;
 } game_client_t;
@@ -20,11 +23,14 @@ typedef struct game_client_s
 
 /////////// FORWARD DECLARATIONS ////////////
 
+void game_client_destroy(game_client_t *client);
 void game_handle_packet(game_client_t *game, int socket, const packet_t *packet);
 
 
 
 /////////// NETWORK ////////////
+
+static const struct timeval SELECT_TO = {.tv_sec=0, .tv_usec=50000};
 
 void net_init(game_client_t *client, const char *host, int port) {
     struct sockaddr_in serv;
@@ -56,30 +62,48 @@ void net_send_packet(game_client_t *client, const packet_t *packet) {
     }
 }
 
-int net_game_read(game_client_t *client, int socket) {
+net_status_t net_game_read(game_client_t *client) {
     static packet_t packet;
     ssize_t size;
 
-    if ((size = read(socket, &packet, sizeof(packet_t))) != sizeof(packet_t)) {
+    if ((size = read(client->socket, &packet, sizeof(packet_t))) != sizeof(packet_t)) {
         if (size == 0) {
-            printf("[INFO] Connection closed on socket: %d\n", socket);
+            printf("[INFO] Connection closed on socket: %d\n", client->socket);
             return CLOSING;
         }
         if (size < 0) {
-            fprintf(stderr, "[ERROR] Could not read socket: %d\n", socket);
+            fprintf(stderr, "[ERROR] Could not read socket: %d\n", client->socket);
             return BROKEN;
         }
-        printf("[INFO] Invalid packet size (%ld) on socket: %d\n", size, socket);
+        printf("[INFO] Invalid packet size (%ld) on socket: %d\n", size, client->socket);
     } else
-        game_handle_packet(client, socket, &packet);
+        game_handle_packet(client, client->socket, &packet);
     return STABLE;
 }
+
+void net_loop(game_client_t *client) {
+    struct timeval timeout = SELECT_TO;
+    
+    FD_ZERO(&client->set);
+    FD_SET(client->socket, &client->set);
+
+    if (select(client->socket + 1, &client->set, NULL, NULL, &timeout) < 0) {
+        perror("select()");
+        game_client_destroy(client);
+        exit(EXIT_FAILURE);
+    }
+    if (FD_ISSET(client->socket, &client->set) && (client->status = net_game_read(client)) != STABLE) {
+        game_client_destroy(client);
+        exit(EXIT_FAILURE);
+    }
+}
+
 
 
 /////////// CLIENT ////////////
 
 void game_client_init(game_client_t *client, const char *host, int port, const char *name) {
-    packet_t join_packet = {.id=CLIENT_PLAYER_INFOS, .packet.client.player_infos={.width=MAX_WIDTH}};
+    packet_t join_packet = {.id=CLIENT_PLAYER_INFOS, .packet.client.player_infos={.start_words=10}};
 
     strncpy(join_packet.packet.client.player_infos.name, name, MAX_PLAYER_NAME_SIZE);
     net_init(client, host, port);
@@ -87,7 +111,8 @@ void game_client_init(game_client_t *client, const char *host, int port, const c
 }
 
 void game_client_destroy(game_client_t *client) {
-    net_send_packet(client, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={"Client disconnect"}});
+    if (client->status == STABLE)
+        net_send_packet(client, &(packet_t){.id=CLIENT_DISCONNECT, .packet.client.player_leave={"Client disconnect"}});
     close(client->socket);
     client->status = CLOSED;
 }
@@ -96,6 +121,7 @@ void game_client_start(game_client_t *client) {
     client->running = 1;
     while (client->running)
     {
+        net_loop(client);
     }
 }
 
@@ -103,20 +129,29 @@ void game_client_start(game_client_t *client) {
 void game_handle_packet(game_client_t *game, int socket, const packet_t *packet) {
     // Suppress unused warnings
     if (game == NULL && socket == -1) return;
-    
+
     printf("Server packet: %d\n", packet->id);
 
     switch (packet->id)
     {
     case SERVER_GAME_STATUS:
         break;
+
     case SERVER_PLAYER_UPDATE:
+        if (packet->packet.server.player_update.player_id != game->info.player_id) {
+            // Update other client
+            break;
+        }
+        [[fallthrough]];
+    case SERVER_PLAYER_ACCEPT:
+        game->info = packet->packet.server.player_accept;
         break;
+    
     case SERVER_PLAYER_REMOVE:
         break;
     case SERVER_PLAYER_JOIN:
         break;
-    case SERVER_NEW_LINE:
+    case SERVER_NEW_WORD:
         break;
     
     default:

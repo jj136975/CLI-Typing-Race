@@ -55,7 +55,7 @@ void net_init(game_client_t *client, const char *host, int port) {
         perror("socket");
         exit(1);
     }
-    printf("socket() called\n");
+    fprintf(stderr, "socket() called\n");
 
     serv.sin_family = PF_INET;
     serv.sin_addr.s_addr = inet_addr(host);
@@ -65,7 +65,7 @@ void net_init(game_client_t *client, const char *host, int port) {
         perror("connect");
         exit(EXIT_FAILURE);
     }
-    printf("connect() called\n");
+    fprintf(stderr, "connect() called\n");
     client->status = STABLE;
 }
 
@@ -84,14 +84,14 @@ net_status_t net_game_read(game_client_t *client) {
 
     if ((size = read(client->socket, &packet, sizeof(packet_t))) != sizeof(packet_t)) {
         if (size == 0) {
-            printf("[INFO] Connection closed on socket: %d\n", client->socket);
+            fprintf(stderr, "[INFO] Connection closed on socket: %d\n", client->socket);
             return CLOSING;
         }
         if (size < 0) {
-            fprintf(stderr, "[ERROR] Could not read socket: %d\n", client->socket);
+            fprintf(stderr, stderr, "[ERROR] Could not read socket: %d\n", client->socket);
             return BROKEN;
         }
-        printf("[INFO] Invalid packet size (%ld) on socket: %d\n", size, client->socket);
+        fprintf(stderr, "[INFO] Invalid packet size (%ld) on socket: %d\n", size, client->socket);
     } else
         game_handle_packet(client, client->socket, &packet);
     return STABLE;
@@ -251,7 +251,7 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
     // Suppress unused warnings
     if (game == NULL && socket == -1) return;
 
-    printf("Server packet: %d\n", packet->id);
+    fprintf(stderr, "Server packet: %d\n", packet->id);
 
     switch (packet->id)
     {
@@ -264,8 +264,8 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
                     free(list);
                 }
             }
-            game->game_status = packet->packet.server.game_status;
         }
+        game->game_status = packet->packet.server.game_status;
         break;
     case SERVER_PLAYER_UPDATE:
         if (packet->packet.server.player_update.player_id != game->info.player_id) {
@@ -311,7 +311,7 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         it->next = node;
         break;
     default:
-        printf("[INFO] Invalid packet received: %d\n", packet->id);
+        fprintf(stderr, "[INFO] Invalid packet received: %d\n", packet->id);
     }
 }
 
@@ -327,10 +327,10 @@ static const struct itimerval TIMER = {
 
 void signal_handler(int signal) {
     if (TARGET == NULL)
-        fprintf(stderr, "[ERROR] No target for signal (%d)\n", signal);
+        fprintf(stderr, stderr, "[ERROR] No target for signal (%d)\n", signal);
     else {
         *TARGET = 0;
-        printf("[INFO] Gracefully shutting down client\n");
+        fprintf(stderr, "[INFO] Gracefully shutting down client\n");
     }
 }
 
@@ -350,12 +350,12 @@ int main(int argc, char *argv[]) {
     int port;
 
     if (argc != 4) {
-        fprintf(stderr, USAGE);
+        fprintf(stderr, stderr, USAGE);
         exit(EXIT_FAILURE);
     }
     port = strtol(argv[2], NULL, 10);
     if (port == 0) {
-        fprintf(stderr, "[ERROR] Invalid port: %s\n", argv[2]);
+        fprintf(stderr, stderr, "[ERROR] Invalid port: %s\n", argv[2]);
         exit(EXIT_FAILURE);
     }
     signal(SIGINT, signal_handler);

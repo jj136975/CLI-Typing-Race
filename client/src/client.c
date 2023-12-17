@@ -88,7 +88,7 @@ net_status_t net_game_read(game_client_t *client) {
             return CLOSING;
         }
         if (size < 0) {
-            fprintf(stderr, stderr, "[ERROR] Could not read socket: %d\n", client->socket);
+            fprintf(stderr, "[ERROR] Could not read socket: %d\n", client->socket);
             return BROKEN;
         }
         fprintf(stderr, "[INFO] Invalid packet size (%ld) on socket: %d\n", size, client->socket);
@@ -327,7 +327,7 @@ static const struct itimerval TIMER = {
 
 void signal_handler(int signal) {
     if (TARGET == NULL)
-        fprintf(stderr, stderr, "[ERROR] No target for signal (%d)\n", signal);
+        fprintf(stderr, "[ERROR] No target for signal (%d)\n", signal);
     else {
         *TARGET = 0;
         fprintf(stderr, "[INFO] Gracefully shutting down client\n");
@@ -350,12 +350,12 @@ int main(int argc, char *argv[]) {
     int port;
 
     if (argc != 4) {
-        fprintf(stderr, stderr, USAGE);
+        fprintf(stderr, USAGE);
         exit(EXIT_FAILURE);
     }
     port = strtol(argv[2], NULL, 10);
     if (port == 0) {
-        fprintf(stderr, stderr, "[ERROR] Invalid port: %s\n", argv[2]);
+        fprintf(stderr, "[ERROR] Invalid port: %s\n", argv[2]);
         exit(EXIT_FAILURE);
     }
     signal(SIGINT, signal_handler);

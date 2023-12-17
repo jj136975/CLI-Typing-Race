@@ -11,6 +11,8 @@
 
 #include "packet.h"
 
+#define MAX_PLAYER 4
+
 typedef struct word_list_s
 {
     struct word_list_s *next;
@@ -32,6 +34,8 @@ typedef struct game_client_s
     int                  running;
     word_list_t          *words;
     server_game_status_t game_status;
+    scorboard_t          scores[MAX_PLAYER];
+    int                  player_count;
 } game_client_t;
 
 /////////// FORWARD DECLARATIONS ////////////
@@ -42,8 +46,6 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
 
 
 /////////// NETWORK ////////////
-
-static const struct timeval SELECT_TO = {.tv_sec=0, .tv_usec=50000};
 
 void net_init(game_client_t *client, const char *host, int port) {
     struct sockaddr_in serv;
@@ -121,8 +123,11 @@ void net_loop(game_client_t *client) {
 void game_client_init(game_client_t *client, const char *host, int port, const char *name) {
     packet_t join_packet = {.id=CLIENT_PLAYER_INFOS, .packet.client.player_infos={.start_words=MAX_START_WORDS}};
 
+    client->player_count = 0;
     client->words = 0;
+    client->game_status.time_remain = 0;
     strncpy(join_packet.packet.client.player_infos.name, name, MAX_PLAYER_NAME_SIZE);
+    strncpy(client->scores[0].name, name, MAX_PLAYER_NAME_SIZE);
     net_init(client, host, port);
     net_send_packet(client, &join_packet);
 }
@@ -175,8 +180,9 @@ void writing_screen(game_client_t *game, int *pos)
 {
     char word[MAX_STRING_SIZE];
 
-    if (!game->words)
+    if (!game->words) {
         return;
+    }
     strncpy(word, game->words->word, MAX_STRING_SIZE);
     move(1, 1);
     attron(COLOR_PAIR(1));
@@ -198,9 +204,9 @@ void writing_screen(game_client_t *game, int *pos)
     }
     if (*pos == MAX_STRING_SIZE || word[*pos] == 0) {
         net_send_packet(game, &(packet_t){.id=CLIENT_WORD_COMPLETE});
-        // word_list_t *tmp = game->words;
-        // game->words = game->words->next;
-        // free(tmp);
+        word_list_t *tmp = game->words;
+        game->words = game->words->next;
+        free(tmp);
         (*pos) = 0;
     }
 }
@@ -213,31 +219,8 @@ void waiting_screen()
 
 void game_client_start(game_client_t *client)
 {
-    int player_count = 3;
-    scorboard_t scores[4] = {
-        {
-            .name="rat",
-            .score=10
-        },
-        {
-            .name="thomas",
-            .score=5
-        },
-        {
-            .name="a",
-            .score=8
-        },
-        {
-            .name="zjgao",
-            .score=85
-        }
-    };
     int cursor_pos = 0;
-    int time_remain = 10;
 
-    client->words = malloc(sizeof(word_list_t));
-    client->words->next = 0;
-    strncpy(client->words->word, "salut", MAX_STRING_SIZE);
     init_ncurse_win();
     client->running = 1;
     while (client->running)
@@ -246,11 +229,14 @@ void game_client_start(game_client_t *client)
         clear();
         if (invalid_terminal_size())
             continue;
-        timer(time_remain);
-        scorboard(scores, player_count);
-        writing_screen(client, &cursor_pos);
-        if (time_remain > 0)
-            time_remain--;
+        timer(client->game_status.time_remain);
+        scorboard(client->scores, client->player_count);
+        if (client->game_status.state == RUNNING)
+            writing_screen(client, &cursor_pos);
+        else
+            waiting_screen();
+        if (client->game_status.time_remain > 0)
+            client->game_status.time_remain--;
     }
 }
 
@@ -264,7 +250,16 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
     switch (packet->id)
     {
     case SERVER_GAME_STATUS:
-        game->game_status = packet->packet.server.game_status;
+        if (packet->packet.server.game_status.state != game->game_status.state) {
+            if (packet->packet.server.game_status.state == WAITTING) {
+                while (game->words) {
+                    word_list_t *list = game->words;
+                    game->words = game->words->next;
+                    free(list);
+                }
+            }
+            game->game_status = packet->packet.server.game_status;
+        }
         break;
     case SERVER_PLAYER_UPDATE:
         if (packet->packet.server.player_update.player_id != game->info.player_id) {
@@ -273,11 +268,26 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         [[fallthrough]];
     case SERVER_PLAYER_ACCEPT:
         game->info = packet->packet.server.player_accept;
+        game->scores[game->player_count].score = game->info.score;
+        game->scores[game->player_count].player_id = game->info.player_id;
+        game->player_count++;
         break;
     
     case SERVER_PLAYER_REMOVE:
+        for (int i = 0; i < MAX_PLAYER; i++) {
+            if (game->scores[i].player_id == packet->packet.server.player_remove.player_id) {
+                game->player_count--;
+                if (i != game->player_count)
+                    game->scores[i] = game->scores[game->player_count];
+            }
+        }
         break;
     case SERVER_PLAYER_JOIN:
+        server_player_join_t info = packet->packet.server.player_join;
+        game->scores[game->player_count].score = info.info.score;
+        game->scores[game->player_count].player_id = info.info.player_id;
+        strncpy(game->scores[game->player_count].name, info.name, MAX_PLAYER_NAME_SIZE);
+        game->player_count++;
         break;
     case SERVER_NEW_WORD:
         word_list_t *node = malloc(sizeof(node));
@@ -294,7 +304,6 @@ void game_handle_packet(game_client_t *game, int socket, const packet_t *packet)
         }
         it->next = node;
         break;
-    
     default:
         printf("[INFO] Invalid packet received: %d\n", packet->id);
     }

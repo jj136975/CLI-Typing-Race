@@ -464,6 +464,8 @@ void game_handle_packet(game_server_t *game, int socket, const packet_t *packet)
             player->current = player->current->next;
             if (player->info.score++ >= MAX_SCORE)
                 game_end(game, player);
+            else
+                player_send_word(game, player);
         }
         break;
     
